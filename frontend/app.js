@@ -52,13 +52,9 @@ function startRecognition() {
     const playBtn = document.createElement("button");
     playBtn.innerText = "语音播放";
     playBtn.onclick = () => {
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = "zh-CN";
-    const voices = speechSynthesis.getVoices();
-    const zhVoice = voices.find(v => v.lang.startsWith("zh"));
-    if (zhVoice) utterance.voice = zhVoice;
-    speechSynthesis.speak(utterance);
+      speakText(text);
     };
+
     result.appendChild(playBtn);
 
     // 第一个换行
@@ -92,4 +88,27 @@ function startRecognition() {
     busy = false;
     btn.disabled = false;
   };
+}
+
+function speakText(text) {
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = "zh-CN";
+
+  // Helper to set voice
+  function setVoice() {
+    const voices = speechSynthesis.getVoices();
+    const zhVoice = voices.find(v => v.lang.startsWith("zh"));
+    if (zhVoice) utterance.voice = zhVoice;
+  }
+
+  if (speechSynthesis.getVoices().length === 0) {
+    // Voices not loaded yet
+    speechSynthesis.onvoiceschanged = () => {
+      setVoice();
+      speechSynthesis.speak(utterance);
+    };
+  } else {
+    setVoice();
+    speechSynthesis.speak(utterance);
+  }
 }
