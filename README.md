@@ -1,0 +1,18 @@
+# 语音驱动日程助手
+
+## 功能
+- 语音输入日程
+- 自动解析时间
+- 通过浏览器自动化添加 Google 日历事件
+- 不使用 Google Calendar API
+
+## 技术
+- FastAPI
+- Playwright
+- Web Speech API
+
+## 使用步骤
+1. 启动后端
+2. 首次运行手动登录 Google
+3. 打开前端页面
+4. 点击按钮说话
