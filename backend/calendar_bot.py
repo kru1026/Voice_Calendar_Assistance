@@ -5,7 +5,8 @@ def add_event_to_calendar(event):
     with sync_playwright() as p:
         browser = p.chromium.launch_persistent_context(
             user_data_dir="chrome_data",
-            headless=False
+            headless=False,
+            channel="chrome"
         )
 
         page = browser.new_page()

@@ -16,3 +16,16 @@
 2. 首次运行手动登录 Google
 3. 打开前端页面
 4. 点击按钮说话
+
+## Setup
+```bash
+git clone <repo-url>
+cd <repo-name>
+
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+
+pip install -r requirements.txt
+playwright install
+
+

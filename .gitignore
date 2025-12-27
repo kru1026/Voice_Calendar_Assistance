@@ -1,1 +1,4 @@
 backend/chrome_data/
+venv/
+.env/
+__pycache__/

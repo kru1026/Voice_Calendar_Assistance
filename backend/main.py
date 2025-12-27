@@ -32,3 +32,4 @@ def handle_speech(data: SpeechInput):
         "status": "success",
         "event": event
     }
+
