@@ -3,11 +3,22 @@
 <head>
   <meta charset="UTF-8">
   <title>语音日程助手</title>
+
+  <script>
+    console.log("[DEBUG] HTML head loaded");
+  </script>
 </head>
 <body>
   <h2>🎤 语音日程助手</h2>
   <button id="recordBtn">开始说话</button>
   <p id="result"></p>
-<script src="app.js"></script>
+
+  <script>
+    console.log("[DEBUG] HTML body loaded");
+    console.log("[DEBUG] recordBtn exists:", !!document.getElementById("recordBtn"));
+    console.log("[DEBUG] result exists:", !!document.getElementById("result"));
+  </script>
+
+  <script src="app.js"></script>
 </body>
 </html>

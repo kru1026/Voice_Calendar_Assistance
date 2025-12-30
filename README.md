@@ -25,7 +25,11 @@ cd <repo-name>
 python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 
+cd Voice_Calendar_Assistance/backend
 pip install -r requirements.txt
 playwright install
+
+uvicorn main:app --reload
+python -m http.server 8080
 
 

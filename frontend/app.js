@@ -3,107 +3,116 @@ const result = document.getElementById("result");
 
 const greeting = "您好，我是您的日程助手，你要记录什么日程？";
 
-// 状态锁
-let busy = false;
+console.log("[DEBUG] Script loaded");
 
 btn.onclick = () => {
-  if (busy) return; // 播报/识别期间直接忽略
-  busy = true;
+  console.log("[DEBUG] Record button clicked");
   btn.disabled = true;
+  console.log("[DEBUG] Button locked, starting speakThenListen");
+
   speakThenListen();
 };
 
 function speakThenListen() {
+  console.log("[DEBUG] speakThenListen()");
+
   const utterance = new SpeechSynthesisUtterance(greeting);
   utterance.lang = "zh-CN";
 
-  // 可选：选中文声音
-  const voices = speechSynthesis.getVoices();
-  const zhVoice = voices.find(v => v.lang.startsWith("zh"));
-  if (zhVoice) utterance.voice = zhVoice;
+    utterance.onend = () => {
+      console.log("[DEBUG] Greeting speech ended");
+      startRecognition();
+    };
 
-  utterance.onend = () => {
-    startRecognition();
-  };
-
-  speechSynthesis.speak(utterance);
-}
+    speechSynthesis.speak(utterance);
+  }
 
 function startRecognition() {
+  console.log("[DEBUG] startRecognition()");
+
   const recognition = new webkitSpeechRecognition();
   recognition.lang = "zh-CN";
   recognition.continuous = false;
   recognition.interimResults = false;
 
   recognition.start();
+  console.log("[DEBUG] Speech recognition started");
 
   recognition.onresult = async (e) => {
+    console.log("[DEBUG] Recognition result event:", e);
+
     recognition.stop();
+    console.log("[DEBUG] Recognition stopped");
 
     const text = e.results[0][0].transcript;
+    console.log("[DEBUG] Recognized text:", text);
+
     result.innerText = "识别内容：" + text;
 
-    // 第一个换行
     result.appendChild(document.createElement("br"));
-
-    // 第二个换行
     result.appendChild(document.createElement("br"));
 
     const playBtn = document.createElement("button");
     playBtn.innerText = "语音播放";
     playBtn.onclick = () => {
+      console.log("[DEBUG] Play button clicked");
       speakText(text);
     };
-
     result.appendChild(playBtn);
 
-    // 第一个换行
+    result.appendChild(document.createElement("br"));
     result.appendChild(document.createElement("br"));
 
-    // 第二个换行
-    result.appendChild(document.createElement("br"));
-    
-    // 然后再添加按钮或其他内容
     const actionBtn = document.createElement("button");
     actionBtn.innerText = "重新创建";
     actionBtn.onclick = () => {
-    location.reload();
+      console.log("[DEBUG] Reload button clicked");
+      location.reload();
     };
     result.appendChild(actionBtn);
 
-    await fetch("http://127.0.0.1:8000/speech", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text })
-    });
+    console.log("[DEBUG] Sending text to backend:", text);
 
-    // 解锁按钮
-    busy = false;
-    btn.disabled = false;
+    try {
+      const resp = await fetch("http://127.0.0.1:8000/speech", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text })
+      });
+      console.log("[DEBUG] Backend response status:", resp.status);
+    } catch (err) {
+      console.error("[ERROR] Backend request failed:", err);
+    }
   };
 
   recognition.onerror = (e) => {
     recognition.stop();
-    console.error("语音识别错误", e);
-    busy = false;
-    btn.disabled = false;
+    console.error("[ERROR] Speech recognition error:", e);
+    console.log("[DEBUG] busy unlocked after error");
   };
 }
 
 function speakText(text) {
+  console.log("[DEBUG] speakText()", text);
+
   const utterance = new SpeechSynthesisUtterance(text);
   utterance.lang = "zh-CN";
 
-  // Helper to set voice
   function setVoice() {
     const voices = speechSynthesis.getVoices();
     const zhVoice = voices.find(v => v.lang.startsWith("zh"));
-    if (zhVoice) utterance.voice = zhVoice;
+    if (zhVoice) {
+      utterance.voice = zhVoice;
+      console.log("[DEBUG] speakText using voice:", zhVoice.name);
+    } else {
+      console.log("[WARN] speakText no zh voice found");
+    }
   }
 
   if (speechSynthesis.getVoices().length === 0) {
-    // Voices not loaded yet
+    console.log("[DEBUG] Voices not loaded yet, waiting...");
     speechSynthesis.onvoiceschanged = () => {
+      console.log("[DEBUG] Voices loaded");
       setVoice();
       speechSynthesis.speak(utterance);
     };
