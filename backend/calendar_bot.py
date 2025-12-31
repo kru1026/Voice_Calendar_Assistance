@@ -81,38 +81,32 @@ def extract_event_times(label):
 
 
 def is_slot_occupied(page, date, start_time, end_time):
-    """
-    Check if a time slot is occupied in Google Calendar.
-    
-    Parameters:
-        page: Playwright page object
-        date: string "YYYY-MM-DD"
-        start_time, end_time: string "HH:MM" (24-hour format)
-    
-    Returns:
-        True if any event overlaps the slot, False otherwise
-    """
+
+    url = f"https://calendar.google.com/calendar/u/0/r/day/{date.replace('-', '/')}"
+    page.goto(url)
+
     # Convert desired slot to minutes since midnight
     start_dt = datetime.strptime(start_time, "%H:%M")
     end_dt = datetime.strptime(end_time, "%H:%M")
     slot_start_min = start_dt.hour * 60 + start_dt.minute
     slot_end_min = end_dt.hour * 60 + end_dt.minute
 
-    # Select all gridcells in the calendar
-    gridcells = page.query_selector_all('div[role="gridcell"]')
+    # ---------- Select only real grid cells ----------
+    # div.XsRa1c are the actual event grid cells
+    gridcells = page.query_selector_all('div.XsRa1c')
 
     for cell in gridcells:
-        # Look for all spans inside the cell
-        spans = cell.query_selector_all('span')
+        spans = cell.query_selector_all('span.wO6pL.iHNmdb')  # only event spans
         for span in spans:
             label = span.inner_text().strip()
             if not label:
                 continue
 
-            # Normalize dash and lowercase
-            label = label.replace("–", "-").replace("—", "-").lower()
+            # Normalize dash and remove extra spaces/unicode
+            label = re.sub(r"[–—−]", "-", label.replace("\u202f", "").replace("\xa0", ""))
+            label = label.lower()
 
-            # Skip non-time labels (e.g., "all day", "TBA")
+            # Skip non-time labels
             if not re.search(r"\d", label):
                 continue
 
@@ -123,11 +117,12 @@ def is_slot_occupied(page, date, start_time, end_time):
                 event_end_str = parts[1].strip().split()[0]  # remove title if any
             else:
                 event_start_str = label
-                event_end_str = None  # will use default 30 min duration
+                event_end_str = None
 
             # Helper to convert time string to minutes since midnight
             def parse_time_string(s):
-                s = s.strip().lower().replace("am", " am").replace("pm", " pm")
+                s = s.strip().lower()
+                s = re.sub(r"\s+", "", s)
                 match = re.match(r"(\d{1,2})(?::(\d{1,2}))?\s*(am|pm)?", s)
                 if not match:
                     return None
@@ -142,21 +137,21 @@ def is_slot_occupied(page, date, start_time, end_time):
 
             event_start_min = parse_time_string(event_start_str)
             if event_start_min is None:
-                continue  # skip unparseable start time
+                continue
 
             if event_end_str:
                 event_end_min = parse_time_string(event_end_str)
                 if event_end_min is None:
-                    continue  # skip unparseable end time
+                    continue
             else:
-                event_end_min = event_start_min + 30  # default 30-minute duration
+                event_end_min = event_start_min + 30  # default duration
 
-            # Check if event overlaps with desired slot
+            # Check for overlap
             if slot_start_min < event_end_min and slot_end_min > event_start_min:
                 return True
 
-    # No overlapping event found
     return False
+
 
 
 
@@ -252,10 +247,10 @@ def add_event_to_calendar(initial_event, recognized_text=None):
         event = initial_event
         while True:
             # Check if slot is occupied
-            occupied = is_slot_occupied(page, event['date'], event['start_time'], event['end_time'])
+            occupied = is_slot_occupied(page, event['start_date'], event['start_time'], event['end_time'])
     
             if occupied:
-                msg = f"您在{event['date']} {event['start_time']}到{event['end_time']}已有日程安排，请在前端重新创造新日程。"
+                msg = f"您在{event['start_date']} {event['start_time']}到{event['end_time']}已有日程安排，请在前端重新创造新日程。"
                 print("[WARN]", msg)
                 speak_message(msg)
 
@@ -293,11 +288,11 @@ def add_event_to_calendar(initial_event, recognized_text=None):
                 page.wait_for_timeout(300)
                 print("More options clicked")
 
-                print("date is: ", event["date"])
+                print("date is: ", event["start_date"])
 
                 page.get_by_label("Start date").click()
                 # Suppose event["date"] = "2025-12-31"
-                date_obj = datetime.strptime(event["date"], "%Y-%m-%d")
+                date_obj = datetime.strptime(event["start_date"], "%Y-%m-%d")
                 date_str = date_obj.strftime("%Y%m%d")
                 print(date_str)
                
@@ -321,25 +316,43 @@ def add_event_to_calendar(initial_event, recognized_text=None):
 
                 start_time = round_down_24h_to_pre_15mins(event["start_time"])
                 print(start_time)
-                page.get_by_role("option", name=start_time).click()
+                page.get_by_role("option", name=start_time, exact=True).click()
 
                 end_time_input = page.get_by_role("combobox", name="End time")
                 end_time_input.click()
                 end_time = round_up_24h_to_next_30mins(event["end_time"])
+                
                 print(event["end_time"])
                 print(end_time)
-                page.get_by_role("option", name=end_time).click()
+                option_locator = page.get_by_role("option", name=end_time)
+
+                try:
+                    option_locator.click()
+                except:
+                # 找不到就往上滚动找下一个可选时间
+                    all_options = page.get_by_label("End date").click()
+                    count = all_options.count()
+                    chosen = False
+                    for i in range(count):
+                        text = all_options.nth(i).inner_text().strip()
+                    if text > end_time:  # 向上取整选择
+                        all_options.nth(i).click()
+                        chosen = True
+                        break
+                    if not chosen:
+                        # 兜底：选择最后一个 option
+                        all_options.nth(count-1).click()
 
                 #page.get_by_label("End date").click()
                 # Suppose event["date"] = "2025-12-31"
                 # date_obj 是开始日期
-                date_obj2 = datetime.strptime(event["date"], "%Y-%m-%d")
-                if event["start_time"] > event["end_time"]:
-                    end_date_obj = date_obj2 + timedelta(days=1)  # 增加一天
-                else:
-                    end_date_obj = date_obj2
+                date_obj2 = datetime.strptime(event["end_date"], "%Y-%m-%d")
+                # if event["start_time"] > event["end_time"]:
+                #     end_date_obj = date_obj2 + timedelta(days=1)  # 增加一天
+                # else:
+                #     end_date_obj = date_obj2
 
-                date_str2 = end_date_obj.strftime("%Y%m%d")  
+                date_str2 = date_obj2.strftime("%Y%m%d")  
 
                 print("end date is ", date_str2)
 
@@ -363,13 +376,19 @@ def add_event_to_calendar(initial_event, recognized_text=None):
                 # # click it
                 # day_cell2.click()
 
-                page.get_by_role("gridcell", name="31").click()
+                #page.get_by_role("gridcell", name="31").click()
+                # select the td representing the date
+                #day_cell2 = page.locator(f'td[data-date="{date_str2}"]:not([data-dragsource-type])')
 
+                # wait until visible, scroll if needed
+                #day_cell2.wait_for(state="visible")
+                #day_cell2.scroll_into_view_if_needed()
 
+                # click it
+                #day_cell2.click()
 
+                page.get_by_role("gridcell", name=f"{date_obj2.day}, {date_obj2.strftime('%A')}").click()
 
-
-                
                 #page.get_by_role("gridcell", name=day_str2).filter(has_text=month_name).click()
                 print("day selected")
 
