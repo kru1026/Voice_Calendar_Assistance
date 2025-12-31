@@ -1,11 +1,10 @@
 import time
 import re
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, expect
 from nlu import parse_event
 import pyttsx3 
 import speech_recognition as sr
-from playwright.sync_api import expect
-from datetime import datetime
+from datetime import datetime, timedelta
 
 DEBUG_PORT = 9222
 
@@ -37,56 +36,123 @@ def speak_message(message):
     engine.say(message)
     engine.runAndWait()
 
+
 def time_to_minutes(time_str):
-    """Convert 12-hour time string like '10:30am' or '2:15pm' to minutes since midnight."""
-    m = re.match(r'(\d+):?(\d{0,2})\s*(am|pm)', time_str.lower())
-    if not m:
-        return 0
-    h, minute, period = int(m.group(1)), int(m.group(2) or 0), m.group(3)
-    if period == 'pm' and h != 12:
-        h += 12
-    if period == 'am' and h == 12:
-        h = 0
-    return h * 60 + minute
+    """Convert time string like '10:00am', '14:30', or '2pm' to minutes since midnight."""
+    time_str = time_str.strip().lower()
+
+    # Remove spaces
+    time_str = time_str.replace(" ", "")
+
+    # Match hour:minute
+    match = re.match(r'(\d{1,2})(?::(\d{2}))?(am|pm)?', time_str)
+    if not match:
+        return 0  # fallback
+
+    hour = int(match.group(1))
+    minute = int(match.group(2)) if match.group(2) else 0
+    meridiem = match.group(3)
+
+    if meridiem == "pm" and hour != 12:
+        hour += 12
+    if meridiem == "am" and hour == 12:
+        hour = 0
+
+    return hour * 60 + minute
+
+def extract_event_times(label):
+    """
+    Extract start and end times from Google Calendar aria-label.
+    Handles:
+        - 10:00am – 11:00am
+        - 2–3pm
+        - 14:00–15:00
+    """
+    if not label:
+        return None, None
+
+    # Match hour-only or hour:minute with optional am/pm
+    match = re.search(r'(\d{1,2}(?::\d{2})?(?:am|pm)?)\s*–\s*(\d{1,2}(?::\d{2})?(?:am|pm)?)', label, re.I)
+    if match:
+        return match.group(1), match.group(2)
+    return None, None
+
+import re
 
 def is_slot_occupied(page, date, start_time, end_time):
-    """Check if a time slot is already occupied in Google Calendar."""
-    # Go to the specific day view
-    page.goto(f"https://calendar.google.com/calendar/r/day/{date.replace('-', '/')}")
-    time.sleep(3)  # wait for full render
+    """
+    Check if a time slot is occupied in Google Calendar.
+    
+    Parameters:
+        page: Playwright page object
+        start_time, end_time: datetime objects representing the slot to check
+    
+    Returns:
+        True if any event overlaps the slot, False otherwise
+    """
+    start_time_obj = datetime.strptime(start_time, "%H:%M")
+    end_time_obj = datetime.strptime(end_time, "%H:%M")
 
-    start_min = time_to_minutes(start_time)
-    end_min = time_to_minutes(end_time)
+    start_min = start_time_obj.hour * 60 + start_time_obj.minute
+    end_min = end_time_obj.hour * 60 + end_time_obj.minute
 
-    # Select **all divs in the main calendar grid that contain a dash in the aria-label**
-    # Usually event labels are like "10:00am – 11:00am Event Title"
-    events = page.query_selector_all('div[role="gridcell"] div[aria-label*="–"]')
-
-    for e in events:
+    # select all gridcell divs with aria-labels
+    gridcells = page.query_selector_all('div[role="gridcell"] div[aria-label]')
+    for e in gridcells:
         label = e.get_attribute('aria-label')
         if not label:
             continue
 
-        # Split start and end time from the label
-        parts = label.split('–')
+        # normalize label
+        label = label.replace("\n", " ").strip()
+        label = label.replace("–", "-").replace("—", "-")  # normalize dashes
+        if "-" not in label:
+            continue
+
+        parts = label.split("-")
         if len(parts) < 2:
             continue
 
         event_start_str = parts[0].strip()
-        # The end time may be followed by event title, take first word
-        event_end_str = parts[1].strip().split()[0]
+        event_end_str = parts[1].strip().split()[0]  # remove event title if present
 
-        event_start_min = time_to_minutes(event_start_str)
-        event_end_min = time_to_minutes(event_end_str)
+        def parse_time_string(s):
+            """
+            Convert a string like '2', '2pm', '2:30pm', '14:30' to minutes since midnight
+            """
+            s = s.lower().replace("am"," am").replace("pm"," pm").strip()
+            match = re.match(r"(\d{1,2})(?::(\d{1,2}))?\s*(am|pm)?", s)
+            if not match:
+                return None
+            h = int(match.group(1))
+            m = int(match.group(2)) if match.group(2) else 0
+            meridiem = match.group(3)
+            if meridiem == "pm" and h < 12:
+                h += 12
+            if meridiem == "am" and h == 12:
+                h = 0
+            return h*60 + m
 
-        # Check for overlap
+        event_start_min = parse_time_string(event_start_str)
+        event_end_min = parse_time_string(event_end_str)
+
+        if event_start_min is None or event_end_min is None:
+            continue
+
+        # overlap check
         if start_min < event_end_min and end_min > event_start_min:
-            return True  # slot is occupied
+            return True
 
-    return False  # slot is free
+    return False
 
 
-def round_down_24h_to_gc(time_24h: str) -> str:
+
+
+
+
+
+
+def round_down_24h_to_pre_15mins(time_24h: str) -> str:
     """
     Convert 24-hour time string (HH:MM) to Google Calendar format,
     rounding down to previous 15-minute interval.
@@ -101,6 +167,45 @@ def round_down_24h_to_gc(time_24h: str) -> str:
     # Format for Google Calendar: h:mmam/pm (lowercase, no space)
     # Use %-I on Linux/macOS; on Windows use %I and strip leading zero
     return dt.strftime("%I:%M%p").lstrip("0").lower()
+
+def round_up_24h_to_next_30mins(time_24h: str) -> str:
+    """
+    Convert 24-hour time string (HH:MM) to Google Calendar format,
+    rounding UP to the next 30-minute interval.
+    """
+    dt = datetime.strptime(time_24h, "%H:%M")
+    
+    # Round minutes up to next 30-minute interval
+    minute = dt.minute
+    if minute == 0 or minute <= 30:
+        dt = dt.replace(minute=30 if minute > 0 else 0, second=0)
+        if minute > 30:
+            dt += timedelta(hours=1)
+            dt = dt.replace(minute=0)
+    # Actually simpler using math:
+    # dt += timedelta(minutes=(30 - dt.minute % 30) % 30)
+
+    # Format for Google Calendar: h:mmam/pm (lowercase, no space)
+    return dt.strftime("%I:%M%p").lstrip("0").lower()
+
+
+def get_voice_input(prompt="请说新的时间："):
+    print(prompt)
+    speak_message(prompt)  # 可选：用 TTS 语音播报提示
+    r = sr.Recognizer()
+    with sr.Microphone() as source:
+        print("[DEBUG] Listening...")
+        audio = r.listen(source)  # 会自动结束在短暂停顿后
+    try:
+        text = r.recognize_google(audio, language="zh-CN")  # 中文识别
+        print("[DEBUG] Recognized text:", text)
+        return text
+    except sr.UnknownValueError:
+        print("[ERROR] 无法识别语音，请重试。")
+        return get_voice_input(prompt)  # 递归重新听
+    except sr.RequestError as e:
+        print(f"[ERROR] 语音识别服务出错: {e}")
+        return None
 
 
 def add_event_to_calendar(initial_event):
@@ -128,10 +233,11 @@ def add_event_to_calendar(initial_event):
 
         event = initial_event 
         while True:
-            occupied = is_slot_occupied(page, event["date"], event["start_time"], event["end_time"])
+            #occupied = is_slot_occupied(page, event["date"], event["start_time"], event["end_time"])
+            occupied = True
             if occupied:
                 # 提示用户换时间
-                msg = f"您在{event['date']} {event['start_time']}到{event['end_time']}已有日程安排：{conflict_label}，请说新的时间。"
+                msg = f"您在{event['date']} {event['start_time']}到{event['end_time']}已有日程安排，请说新的时间。"
                 print("[WARN]", msg)
                 speak_message(msg)
 
@@ -163,50 +269,81 @@ def add_event_to_calendar(initial_event):
                 page.get_by_label("Start date").click()
                 # Suppose event["date"] = "2025-12-31"
                 date_obj = datetime.strptime(event["date"], "%Y-%m-%d")
-                day_str = str(date_obj.day)  # "31"
-                page.get_by_role("gridcell", name=day_str).click()
+                date_str = date_obj.strftime("%Y%m%d")
+                print(date_str)
+               
+                # select the td representing the date
+                day_cell = page.locator(f'td[data-date="{date_str}"]:not([data-dragsource-type])')
+
+                # wait until visible, scroll if needed
+                day_cell.wait_for(state="visible")
+                day_cell.scroll_into_view_if_needed()
+
+                # click it
+                day_cell.click()
+
+
+
                 print("day selected")
 
                 # # Get the Start time combobox input and click it
                 start_time_input = page.get_by_role("combobox", name="Start time")
                 start_time_input.click()
 
-                start_time = round_down_24h_to_gc(event["start_time"])
+                start_time = round_down_24h_to_pre_15mins(event["start_time"])
                 print(start_time)
                 page.get_by_role("option", name=start_time).click()
 
                 end_time_input = page.get_by_role("combobox", name="End time")
                 end_time_input.click()
-                end_time = round_down_24h_to_gc(event["end_time"])
+                end_time = round_up_24h_to_next_30mins(event["end_time"])
+                print(event["end_time"])
                 print(end_time)
                 page.get_by_role("option", name=end_time).click()
 
-                page.get_by_label("End date").click()
+                #page.get_by_label("End date").click()
                 # Suppose event["date"] = "2025-12-31"
+                # date_obj 是开始日期
                 date_obj2 = datetime.strptime(event["date"], "%Y-%m-%d")
-                day_str2 = str(date_obj2.day)  # "31"
-                page.get_by_role("gridcell", name=day_str2).click()
+                if event["start_time"] > event["end_time"]:
+                    end_date_obj = date_obj2 + timedelta(days=1)  # 增加一天
+                else:
+                    end_date_obj = date_obj2
+
+                date_str2 = end_date_obj.strftime("%Y%m%d")  
+
+                print("end date is ", date_str2)
+
+                # day_cell2 = page.locator(
+                #     f'td[data-date="{date_str2}"] [role="gridcell"]'
+                # )
+                # day_cell2.wait_for(state="visible")
+                # day_cell2.scroll_into_view_if_needed()
+                # day_cell2.click()
+
+                
+                page.get_by_label("End date").click()
+                
+                # select the td representing the date
+                # day_cell2 = page.locator(f'td[data-date="{date_str2}"]:not([data-dragsource-type])')
+
+                # # wait until visible, scroll if needed
+                # day_cell2.wait_for(state="visible")
+                # day_cell2.scroll_into_view_if_needed()
+
+                # # click it
+                # day_cell2.click()
+
+                page.get_by_role("gridcell", name="31").click()
+
+
+
+
+
+                
+                #page.get_by_role("gridcell", name=day_str2).filter(has_text=month_name).click()
                 print("day selected")
 
                 page.locator('button:has-text("Save")').first.click()
                 break
 
-
-
-    def get_voice_input(prompt="请说新的时间："):
-        print(prompt)
-        speak_message(prompt)  # 可选：用 TTS 语音播报提示
-        r = sr.Recognizer()
-        with sr.Microphone() as source:
-            print("[DEBUG] Listening...")
-            audio = r.listen(source)  # 会自动结束在短暂停顿后
-        try:
-            text = r.recognize_google(audio, language="zh-CN")  # 中文识别
-            print("[DEBUG] Recognized text:", text)
-            return text
-        except sr.UnknownValueError:
-            print("[ERROR] 无法识别语音，请重试。")
-            return get_voice_input(prompt)  # 递归重新听
-        except sr.RequestError as e:
-            print(f"[ERROR] 语音识别服务出错: {e}")
-        return None

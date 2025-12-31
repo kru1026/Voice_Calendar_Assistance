@@ -32,4 +32,13 @@ playwright install
 uvicorn main:app --reload
 python -m http.server 8080
 
+## Installing PyAudio
+
+### Windows
+PyAudio may require a pre-built wheel. You can install it with:
+
+1. Download the correct wheel for your Python version:  
+   https://www.lfd.uci.edu/~gohlke/pythonlibs/#pyaudio
+2. Install with pip:
+   pip install path\to\PyAudio‑<version>.whl 
 

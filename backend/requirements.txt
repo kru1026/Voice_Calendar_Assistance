@@ -3,4 +3,4 @@ uvicorn
 playwright
 dateparser
 pyttsx3
-SpeechRecognition
+speechrecognition
