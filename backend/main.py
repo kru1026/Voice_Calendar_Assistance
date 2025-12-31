@@ -7,6 +7,8 @@ import subprocess
 import time
 import os
 
+latest_recognized_text = None
+
 app = FastAPI()
 
 print("[DEBUG] FastAPI app starting...")
@@ -52,6 +54,8 @@ print("Chrome 已启动，调试端口:", DEBUG_PORT)
 
 @app.post("/speech")
 def handle_speech(data: SpeechInput):
+    global latest_recognized_text
+    latest_recognized_text = data.text
     print("[DEBUG] /speech endpoint called")
     print("[DEBUG] Raw input text:", data.text)
 

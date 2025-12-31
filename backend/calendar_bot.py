@@ -8,6 +8,8 @@ from datetime import datetime, timedelta
 
 DEBUG_PORT = 9222
 
+latest_recognized_text = None
+
 def speak_message(message):
     print("[DEBUG] Initializing TTS engine")
     engine = pyttsx3.init()
@@ -77,7 +79,6 @@ def extract_event_times(label):
         return match.group(1), match.group(2)
     return None, None
 
-import re
 
 def is_slot_occupied(page, date, start_time, end_time):
     """
@@ -85,65 +86,78 @@ def is_slot_occupied(page, date, start_time, end_time):
     
     Parameters:
         page: Playwright page object
-        start_time, end_time: datetime objects representing the slot to check
+        date: string "YYYY-MM-DD"
+        start_time, end_time: string "HH:MM" (24-hour format)
     
     Returns:
         True if any event overlaps the slot, False otherwise
     """
-    start_time_obj = datetime.strptime(start_time, "%H:%M")
-    end_time_obj = datetime.strptime(end_time, "%H:%M")
+    # Convert desired slot to minutes since midnight
+    start_dt = datetime.strptime(start_time, "%H:%M")
+    end_dt = datetime.strptime(end_time, "%H:%M")
+    slot_start_min = start_dt.hour * 60 + start_dt.minute
+    slot_end_min = end_dt.hour * 60 + end_dt.minute
 
-    start_min = start_time_obj.hour * 60 + start_time_obj.minute
-    end_min = end_time_obj.hour * 60 + end_time_obj.minute
+    # Select all gridcells in the calendar
+    gridcells = page.query_selector_all('div[role="gridcell"]')
 
-    # select all gridcell divs with aria-labels
-    gridcells = page.query_selector_all('div[role="gridcell"] div[aria-label]')
-    for e in gridcells:
-        label = e.get_attribute('aria-label')
-        if not label:
-            continue
+    for cell in gridcells:
+        # Look for all spans inside the cell
+        spans = cell.query_selector_all('span')
+        for span in spans:
+            label = span.inner_text().strip()
+            if not label:
+                continue
 
-        # normalize label
-        label = label.replace("\n", " ").strip()
-        label = label.replace("–", "-").replace("—", "-")  # normalize dashes
-        if "-" not in label:
-            continue
+            # Normalize dash and lowercase
+            label = label.replace("–", "-").replace("—", "-").lower()
 
-        parts = label.split("-")
-        if len(parts) < 2:
-            continue
+            # Skip non-time labels (e.g., "all day", "TBA")
+            if not re.search(r"\d", label):
+                continue
 
-        event_start_str = parts[0].strip()
-        event_end_str = parts[1].strip().split()[0]  # remove event title if present
+            # Split start and end times
+            if "-" in label:
+                parts = label.split("-")
+                event_start_str = parts[0].strip()
+                event_end_str = parts[1].strip().split()[0]  # remove title if any
+            else:
+                event_start_str = label
+                event_end_str = None  # will use default 30 min duration
 
-        def parse_time_string(s):
-            """
-            Convert a string like '2', '2pm', '2:30pm', '14:30' to minutes since midnight
-            """
-            s = s.lower().replace("am"," am").replace("pm"," pm").strip()
-            match = re.match(r"(\d{1,2})(?::(\d{1,2}))?\s*(am|pm)?", s)
-            if not match:
-                return None
-            h = int(match.group(1))
-            m = int(match.group(2)) if match.group(2) else 0
-            meridiem = match.group(3)
-            if meridiem == "pm" and h < 12:
-                h += 12
-            if meridiem == "am" and h == 12:
-                h = 0
-            return h*60 + m
+            # Helper to convert time string to minutes since midnight
+            def parse_time_string(s):
+                s = s.strip().lower().replace("am", " am").replace("pm", " pm")
+                match = re.match(r"(\d{1,2})(?::(\d{1,2}))?\s*(am|pm)?", s)
+                if not match:
+                    return None
+                h = int(match.group(1))
+                m = int(match.group(2)) if match.group(2) else 0
+                meridiem = match.group(3)
+                if meridiem == "pm" and h < 12:
+                    h += 12
+                if meridiem == "am" and h == 12:
+                    h = 0
+                return h * 60 + m
 
-        event_start_min = parse_time_string(event_start_str)
-        event_end_min = parse_time_string(event_end_str)
+            event_start_min = parse_time_string(event_start_str)
+            if event_start_min is None:
+                continue  # skip unparseable start time
 
-        if event_start_min is None or event_end_min is None:
-            continue
+            if event_end_str:
+                event_end_min = parse_time_string(event_end_str)
+                if event_end_min is None:
+                    continue  # skip unparseable end time
+            else:
+                event_end_min = event_start_min + 30  # default 30-minute duration
 
-        # overlap check
-        if start_min < event_end_min and end_min > event_start_min:
-            return True
+            # Check if event overlaps with desired slot
+            if slot_start_min < event_end_min and slot_end_min > event_start_min:
+                return True
 
+    # No overlapping event found
     return False
+
 
 
 
@@ -189,62 +203,77 @@ def round_up_24h_to_next_30mins(time_24h: str) -> str:
     return dt.strftime("%I:%M%p").lstrip("0").lower()
 
 
-def get_voice_input(prompt="请说新的时间："):
-    print(prompt)
-    speak_message(prompt)  # 可选：用 TTS 语音播报提示
-    r = sr.Recognizer()
-    with sr.Microphone() as source:
-        print("[DEBUG] Listening...")
-        audio = r.listen(source)  # 会自动结束在短暂停顿后
-    try:
-        text = r.recognize_google(audio, language="zh-CN")  # 中文识别
-        print("[DEBUG] Recognized text:", text)
-        return text
-    except sr.UnknownValueError:
-        print("[ERROR] 无法识别语音，请重试。")
-        return get_voice_input(prompt)  # 递归重新听
-    except sr.RequestError as e:
-        print(f"[ERROR] 语音识别服务出错: {e}")
-        return None
+# def get_voice_input(prompt="请说新的时间："):
+#     print(prompt)
+#     speak_message(prompt)  # 可选：用 TTS 语音播报提示
+#     r = sr.Recognizer()
+#     with sr.Microphone() as source:
+#         print("[DEBUG] Listening...")
+#         audio = r.listen(source)  # 会自动结束在短暂停顿后
+#     try:
+#         text = r.recognize_google(audio, language="zh-CN")  # 中文识别
+#         print("[DEBUG] Recognized text:", text)
+#         return text
+#     except sr.UnknownValueError:
+#         print("[ERROR] 无法识别语音，请重试。")
+#         return get_voice_input(prompt)  # 递归重新听
+#     except sr.RequestError as e:
+#         print(f"[ERROR] 语音识别服务出错: {e}")
+#         return None
 
 
-def add_event_to_calendar(initial_event):
-    """循环检查时间，直到没有冲突再创建日程"""
+def add_event_to_calendar(initial_event, recognized_text=None):
+    """
+    Create a Google Calendar event, waiting for the frontend to send voice input if needed.
+
+    Parameters:
+        initial_event: dict with 'title', 'date', 'start_time', 'end_time'
+        recognized_text: optional string from frontend speech recognition.
+    """
+
+    global latest_recognized_text
+
     with sync_playwright() as p:
         browser = p.chromium.connect_over_cdp(f"http://127.0.0.1:{DEBUG_PORT}")
-
-        # 获取已有的上下文（Chrome 默认会有一个）
         context = browser.contexts[0]
-
-        # 新建或复用页面
         page = context.new_page()
-
         page.goto("https://calendar.google.com", wait_until="load")
-        print(page.title())
+        print("[DEBUG] Page title:", page.title())
 
-        # 等待手动登录
+        # Wait for manual login
         while page.query_selector('input[type="email"]') or "accounts.google.com" in page.url:
             speak_message("Google 登录已过期，请重新登录。")
-            print("[DEBUG] Waiting for user to login...")
+            print("[DEBUG] Waiting for user login...")
             time.sleep(15)
             page.goto("https://calendar.google.com")
 
         print("[DEBUG] Logged in successfully, continuing to create event")
 
-        event = initial_event 
+        event = initial_event
         while True:
-            #occupied = is_slot_occupied(page, event["date"], event["start_time"], event["end_time"])
-            occupied = True
+            # Check if slot is occupied
+            occupied = is_slot_occupied(page, event['date'], event['start_time'], event['end_time'])
+    
             if occupied:
-                # 提示用户换时间
-                msg = f"您在{event['date']} {event['start_time']}到{event['end_time']}已有日程安排，请说新的时间。"
+                msg = f"您在{event['date']} {event['start_time']}到{event['end_time']}已有日程安排，请在前端重新创造新日程。"
                 print("[WARN]", msg)
                 speak_message(msg)
 
-                # 等待用户语音输入新时间
-                new_text = get_voice_input("请说新的时间描述：")
-                if new_text:
-                    event = parse_event(new_text)
+                page.close()
+
+                # Wait for frontend to send new input
+                latest_recognized_text = None
+                print("[DEBUG] Waiting for frontend input...")
+        
+                while latest_recognized_text is None:
+                    time.sleep(1)  # wait until frontend sends new text
+
+                # Now we have valid input
+                event = parse_event(latest_recognized_text)
+                print("[DEBUG] New event data:", event)
+
+                # Continue loop to check if new slot is free
+                    
             else:
                 page.locator('button:has-text("Create"), button:has-text("创建")').first.click()
                 page.wait_for_timeout(300)
@@ -346,4 +375,5 @@ def add_event_to_calendar(initial_event):
 
                 page.locator('button:has-text("Save")').first.click()
                 break
+
 
