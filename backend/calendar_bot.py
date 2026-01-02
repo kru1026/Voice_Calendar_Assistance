@@ -262,7 +262,7 @@ def add_event_to_calendar(initial_event, recognized_text=None):
                 print("[WARN]", msg)
                 speak_message(msg)
 
-                page.close()
+                #page.close()
 
                 # Wait for frontend to send new input
                 latest_recognized_text = None
@@ -274,10 +274,6 @@ def add_event_to_calendar(initial_event, recognized_text=None):
                 # Now we have valid input
                 event = parse_event(latest_recognized_text)
                 print("[DEBUG] New event data:", event)
-
-                browser = p.chromium.connect_over_cdp(f"http://127.0.0.1:{DEBUG_PORT}")
-                context = browser.contexts[0]
-                page.goto("https://calendar.google.com", wait_until="load")
 
                 # Continue loop to check if new slot is free
                     
@@ -317,6 +313,9 @@ def add_event_to_calendar(initial_event, recognized_text=None):
 
                 # click it
                 day_cell.click()
+
+
+
                 print("day selected")
 
                 # # Get the Start time combobox input and click it
@@ -352,8 +351,14 @@ def add_event_to_calendar(initial_event, recognized_text=None):
                         # 兜底：选择最后一个 option
                         all_options.nth(count-1).click()
 
-                
+                #page.get_by_label("End date").click()
+                # Suppose event["date"] = "2025-12-31"
+                # date_obj 是开始日期
                 date_obj2 = datetime.strptime(event["end_date"], "%Y-%m-%d")
+                # if event["start_time"] > event["end_time"]:
+                #     end_date_obj = date_obj2 + timedelta(days=1)  # 增加一天
+                # else:
+                #     end_date_obj = date_obj2
 
                 date_str2 = date_obj2.strftime("%Y%m%d")  
 

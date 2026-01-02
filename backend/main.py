@@ -76,3 +76,6 @@ def handle_speech(data: SpeechInput):
 
     print("[DEBUG] Response sent to frontend:", response)
     return response
+
+#chrome_proc.terminate()     # or .kill()
+#chrome_proc.wait()
