@@ -1,9 +1,9 @@
 import re
 from datetime import datetime, timedelta
 
-# =========================
+# -------------------------
 # 中文数字转换
-# =========================
+# -------------------------
 def chinese_to_digit(chinese_num):
     cn_num = {
         '零': 0, '一': 1, '二': 2, '三': 3, '四': 4,
@@ -38,106 +38,96 @@ def chinese_minute_to_digit(text):
         return chinese_to_digit(m.group(1))
     return 0
 
-
-# =========================
+# -------------------------
 # 解析单个时间点
-# =========================
-def parse_chinese_time(time_text: str, base_date=None):
-    now = base_date or datetime.now()
-    date = now.replace(hour=0, minute=0, second=0, microsecond=0)
+# -------------------------
+def parse_chinese_time(time_text: str, base_date=None, inherit_period=None):
+    now = datetime.now()
+    date = base_date or now
 
-    # ---------- 日期 ----------
-    if "明天" in time_text:
-        date += timedelta(days=1)
-    elif "后天" in time_text:
-        date += timedelta(days=2)
-    else:
-        m = re.search(r"星期([一二三四五六日])", time_text)
-        if m:
-            weekdays = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6}
-            target = weekdays[m.group(1)]
-            delta = (target - now.weekday() + 7) % 7
-            delta = delta if delta != 0 else 7
-            date += timedelta(days=delta)
+    # ---------- Normalize spaces ----------
+    time_text = time_text.replace("\u3000", "").replace("\xa0", "").strip()
 
-    # ---------- 中文数字替换 ----------
-    time_text = re.sub(
-        r'[零一二三四五六七八九十\d]+',
-        lambda m: str(chinese_to_digit(m.group())),
-        time_text
-    )
+    # ---------- Detect date keyword ----------
+    if time_text.startswith("明天"):
+        date = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        time_text = time_text[len("明天"):].lstrip()
+    elif time_text.startswith("后天"):
+        date = (now + timedelta(days=2)).replace(hour=0, minute=0, second=0, microsecond=0)
+        time_text = time_text[len("后天"):].lstrip()
+    elif time_text.startswith("今天"):
+        date = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        time_text = time_text[len("今天"):].lstrip()
 
-    # ---------- 时间 ----------
+    # ---------- Detect period ----------
+    m_period = re.search(r'(上午|下午|早上|晚上|凌晨)', time_text)
+    period = m_period.group() if m_period else inherit_period
+
+    # ---------- Extract hour and minute ----------
     hour, minute = 0, 0
-    m = re.search(r'(\d{1,2})点(半|一刻|三刻|(\d{1,2})分)?', time_text)
-    if m:
-        hour = int(m.group(1))
-        minute = chinese_minute_to_digit(m.group(2))
+    m_time = re.search(r'([零一二三四五六七八九十\d]{1,2})点(半|一刻|三刻|(\d{1,2})分)?', time_text)
+    if m_time:
+        hour_text = m_time.group(1)
+        hour = chinese_to_digit(hour_text)
+        minute = chinese_minute_to_digit(m_time.group(2))
 
-    # ---------- 时段修正 ----------
-    if "凌晨" in time_text:
-        if hour == 12:
-            hour = 0
-        date += timedelta(days=1)
-    elif "晚上" in time_text or "下午" in time_text:
-        if hour < 12:
+    # ---------- Adjust hour for period ----------
+    if period:
+        if period in ["下午", "晚上"] and hour < 12:
             hour += 12
-    elif "上午" in time_text:
-        if hour == 12:
+        if period in ["上午", "凌晨", "早上"] and hour == 12:
             hour = 0
 
     return datetime(date.year, date.month, date.day, hour, minute)
 
-
-# =========================
-# 解析事件（核心）
-# =========================
+# -------------------------
+# 解析事件
+# -------------------------
 def parse_event(text: str):
+    # ---------- Match time range ----------
     time_range_pattern = (
         r'((今天|明天|后天|星期[一二三四五六日])?'
-        r'(上午|下午|晚上|凌晨)?'
+        r'(上午|下午|早上|晚上|凌晨)?'
         r'[零一二三四五六七八九十\d]{1,2}点'
         r'(半|一刻|三刻|(\d{1,2})分)?)'
         r'\s*(到|至|-)\s*'
-        r'((上午|下午|晚上|凌晨)?'
+        r'((上午|下午|早上|晚上|凌晨)?'
         r'[零一二三四五六七八九十\d]{1,2}点'
         r'(半|一刻|三刻|(\d{1,2})分)?)'
     )
 
     m = re.search(time_range_pattern, text)
-
     if m:
         start_text = m.group(1)
         end_text = m.group(7)
 
-        # ---------- 时段继承 ----------
-        start_period = re.search(r'(上午|下午|晚上|凌晨)', start_text)
-        end_period = re.search(r'(上午|下午|晚上|凌晨)', end_text)
-        if not end_period and start_period:
-            end_text = start_period.group() + end_text
+        # ---------- Period inheritance ----------
+        start_period_match = re.search(r'(上午|下午|早上|晚上|凌晨)', start_text)
+        start_period = start_period_match.group() if start_period_match else None
 
-        # ---------- 解析时间 ----------
-        start_dt = parse_chinese_time(start_text)
-        end_dt = parse_chinese_time(end_text, base_date=start_dt)
+        start_dt = parse_chinese_time(start_text, inherit_period=start_period)
+        end_dt = parse_chinese_time(end_text, base_date=start_dt, inherit_period=start_period)
 
-        # ⭐ 跨天判断（如果用户明确是隔天才加天）
+        # ---------- Prevent accidental cross-day ----------
         if end_dt <= start_dt and not re.search(r'(明天|后天|星期)', end_text):
-            # 不自动跨天，保持原时间
+            # do not automatically cross day
             pass
 
         title = text.replace(m.group(), "").strip()
-
     else:
-        # ---------- 单时间 ----------
+        # ---------- Single time ----------
         single_time_pattern = (
-            r'((今天|明天|后天|星期[一二三四五六日])?'
-            r'(上午|下午|晚上|凌晨)?'
+            r'((今天|明天|后天|星期[一二三四五六七八九十\d])?'
+            r'(上午|下午|早上|晚上|凌晨)?'
             r'[零一二三四五六七八九十\d]{1,2}点'
             r'(半|一刻|三刻|(\d{1,2})分)?)'
         )
         m2 = re.search(single_time_pattern, text)
         if m2:
-            start_dt = parse_chinese_time(m2.group(1))
+            start_period_match = re.search(r'(上午|下午|早上|晚上|凌晨)', m2.group())
+            start_period = start_period_match.group() if start_period_match else None
+
+            start_dt = parse_chinese_time(m2.group(1), inherit_period=start_period)
             end_dt = start_dt + timedelta(hours=1)
             title = text.replace(m2.group(), "").strip()
         else:
@@ -145,7 +135,7 @@ def parse_event(text: str):
             end_dt = start_dt + timedelta(hours=1)
             title = text
 
-    # ---------- 清理标题 ----------
+    # ---------- Clean title ----------
     title = re.sub(r"(有|安排|事件)", "", title).strip()
     if not title:
         title = "语音日程"
@@ -158,5 +148,3 @@ def parse_event(text: str):
         "end_time": end_dt.strftime("%H:%M"),
         "description": text
     }
-
-

@@ -40,7 +40,7 @@ def speak_message(message):
 
 
 def time_to_minutes(time_str):
-    """Convert time string like '10:00am', '14:30', or '2pm' to minutes since midnight."""
+    """Convert time string like '10:00am', '14:30', or '2pm' to minutes since midnight"""
     time_str = time_str.strip().lower()
 
     # Remove spaces
@@ -62,103 +62,130 @@ def time_to_minutes(time_str):
 
     return hour * 60 + minute
 
-def extract_event_times(label):
+
+def normalize_event(start_str, end_str):
+    print("start_str", start_str)
+    start_min = time_to_minutes(start_str)
+    end_min = time_to_minutes(end_str)
+    if end_min <= start_min:
+        end_min += 24*60  # handle overnight events
+    return start_min, end_min
+
+def convert_ampm_to_24h(time_str):
     """
-    Extract start and end times from Google Calendar aria-label.
-    Handles:
-        - 10:00am – 11:00am
-        - 2–3pm
-        - 14:00–15:00
+    Converts a time string like '11pm' or '7:30am' into 'HH:MM' 24-hour format.
     """
-    if not label:
-        return None, None
+    time_str = time_str.strip().lower()
 
-    # Match hour-only or hour:minute with optional am/pm
-    match = re.search(r'(\d{1,2}(?::\d{2})?(?:am|pm)?)\s*–\s*(\d{1,2}(?::\d{2})?(?:am|pm)?)', label, re.I)
-    if match:
-        return match.group(1), match.group(2)
-    return None, None
+    print("time_str", time_str)
+    
+    # Separate the number part from am/pm
+    if time_str.endswith('am') or time_str.endswith('pm'):
+        ampm = time_str[-2:]
+        time_part = time_str[:-2].strip()
+    else:
+        raise ValueError(f"Time must end with 'am' or 'pm': '{time_str}'")
+    
+    # Handle hours and optional minutes
+    if ':' in time_part:
+        hours, minutes = map(int, time_part.split(':'))
+    else:
+        hours = int(time_part)
+        minutes = 0
+    
+    # Convert to 24-hour time
+    if ampm == 'am' and hours == 12:
+        hours = 0
+    elif ampm == 'pm' and hours != 12:
+        hours += 12
+    
+    return f"{hours:02d}:{minutes:02d}"
 
 
-def is_slot_occupied(page, date, start_time, end_time):
+def convert_range_to_24h(range_str):
+    """
+    Converts a range like '3-4pm', '3pm-4', or '3 – 4pm'
+    into start and end in 'HH:MM' 24-hour format.
+    """
+    # Normalize dash symbols
+    range_str = range_str.replace('–', '-').replace('—', '-')
 
+    if '-' not in range_str:
+        raise ValueError(f"Invalid range format: '{range_str}'")
+
+    start_part, end_part = map(str.strip, range_str.split('-'))
+
+    start_lower = start_part.lower()
+    end_lower = end_part.lower()
+
+    start_has_ampm = start_lower.endswith(('am', 'pm'))
+    end_has_ampm = end_lower.endswith(('am', 'pm'))
+
+    # If only end has am/pm → append to start
+    if not start_has_ampm and end_has_ampm:
+        start_part += end_part[-2:]
+
+    # If only start has am/pm → append to end
+    if start_has_ampm and not end_has_ampm:
+        end_part += start_part[-2:]
+
+    start_24 = convert_ampm_to_24h(start_part)
+    end_24 = convert_ampm_to_24h(end_part)
+
+    return start_24, end_24
+
+
+
+
+def is_slot_occupied(page, date, original_start_time, original_end_time):
     url = f"https://calendar.google.com/calendar/u/0/r/day/{date.replace('-', '/')}"
     page.goto(url)
 
-    # Convert desired slot to minutes since midnight
-    start_dt = datetime.strptime(start_time, "%H:%M")
-    end_dt = datetime.strptime(end_time, "%H:%M")
-    slot_start_min = start_dt.hour * 60 + start_dt.minute
-    slot_end_min = end_dt.hour * 60 + end_dt.minute
+    events = []
 
-    # ---------- Select only real grid cells ----------
-    # div.XsRa1c are the actual event grid cells
-    gridcells = page.query_selector_all('div.XsRa1c')
+    grids = page.query_selector_all('[role="grid"]')
+    for grid in grids:
+        buttons = grid.query_selector_all('[role="button"]')
+        for button in buttons:
+            text = button.inner_text()
+            if "to" in text:
+                events.append(text)
+                print("event", events)
 
-    for cell in gridcells:
-        spans = cell.query_selector_all('span.wO6pL.iHNmdb')  # only event spans
-        for span in spans:
-            label = span.inner_text().strip()
-            if not label:
-                continue
+    start_end_times = []
 
-            # Normalize dash and remove extra spaces/unicode
-            label = re.sub(r"[–—−]", "-", label.replace("\u202f", "").replace("\xa0", ""))
-            label = label.lower()
+    for event_text in events:
+        # Take only the text after the last \n
+        last_line = event_text.strip().split("\n")[-1]  # e.g., '2:30 – 3:30am'
 
-            # Skip non-time labels
-            if not re.search(r"\d", label):
-                continue
+        #Extract times separated by en dash "–"
+        match = re.search(r'(\d{1,2}(:\d{2})?\s?(am|pm)?)\s*–\s*(\d{1,2}(:\d{2})?\s?(am|pm)?)', last_line, re.I)
+        if match:
+            start_time = match.group(1)
+            end_time = match.group(4)
+            start_end_times.append((start_time, end_time))
 
-            # Split start and end times
-            if "-" in label:
-                parts = label.split("-")
-                event_start_str = parts[0].strip()
-                event_end_str = parts[1].strip().split()[0]  # remove title if any
-            else:
-                event_start_str = label
-                event_end_str = None
+            print(start_end_times)
 
-            # Helper to convert time string to minutes since midnight
-            def parse_time_string(s):
-                s = s.strip().lower()
-                s = re.sub(r"\s+", "", s)
-                match = re.match(r"(\d{1,2})(?::(\d{1,2}))?\s*(am|pm)?", s)
-                if not match:
-                    return None
-                h = int(match.group(1))
-                m = int(match.group(2)) if match.group(2) else 0
-                meridiem = match.group(3)
-                if meridiem == "pm" and h < 12:
-                    h += 12
-                if meridiem == "am" and h == 12:
-                    h = 0
-                return h * 60 + m
+    my_start, my_end = normalize_event(original_start_time, original_end_time)
 
-            event_start_min = parse_time_string(event_start_str)
-            if event_start_min is None:
-                continue
+    #start24h, end24h = convert_range_to_24h(f"{e_start_str} – {e_end_str}")
 
-            if event_end_str:
-                event_end_min = parse_time_string(event_end_str)
-                if event_end_min is None:
-                    continue
-            else:
-                event_end_min = event_start_min + 30  # default duration
-
-            # Check for overlap
-            if slot_start_min < event_end_min and slot_end_min > event_start_min:
-                return True
-
-    return False
-
-
-
-
-
-
-
-
+    for e_start_str, e_end_str in start_end_times:
+        #e_start, e_end = normalize_event(start24h, end24h)
+        normalizedStart, normalizedEnd = (convert_range_to_24h(f"{e_start_str} – {e_end_str}"))
+        e_start, e_end = normalize_event(normalizedStart, normalizedEnd)
+    # Check for overlap
+        if not (my_end < e_start or my_start > e_end):
+            print(f"Conflict with event {e_start_str} – {e_end_str}")
+            print(f"time string {e_start_str} – {e_end_str}")
+            print(f"nomalized time {e_start} – {e_end}")
+            print(f"event time {my_start} – {my_end}")
+            print(f"input time {original_start_time} – {original_end_time}")
+            return True
+        else:
+            print(f"No conflict with event {e_start_str} – {e_end_str}")
+            return False      
 
 
 def round_down_24h_to_pre_15mins(time_24h: str) -> str:
@@ -196,25 +223,6 @@ def round_up_24h_to_next_30mins(time_24h: str) -> str:
 
     # Format for Google Calendar: h:mmam/pm (lowercase, no space)
     return dt.strftime("%I:%M%p").lstrip("0").lower()
-
-
-# def get_voice_input(prompt="请说新的时间："):
-#     print(prompt)
-#     speak_message(prompt)  # 可选：用 TTS 语音播报提示
-#     r = sr.Recognizer()
-#     with sr.Microphone() as source:
-#         print("[DEBUG] Listening...")
-#         audio = r.listen(source)  # 会自动结束在短暂停顿后
-#     try:
-#         text = r.recognize_google(audio, language="zh-CN")  # 中文识别
-#         print("[DEBUG] Recognized text:", text)
-#         return text
-#     except sr.UnknownValueError:
-#         print("[ERROR] 无法识别语音，请重试。")
-#         return get_voice_input(prompt)  # 递归重新听
-#     except sr.RequestError as e:
-#         print(f"[ERROR] 语音识别服务出错: {e}")
-#         return None
 
 
 def add_event_to_calendar(initial_event, recognized_text=None):
@@ -267,6 +275,10 @@ def add_event_to_calendar(initial_event, recognized_text=None):
                 event = parse_event(latest_recognized_text)
                 print("[DEBUG] New event data:", event)
 
+                browser = p.chromium.connect_over_cdp(f"http://127.0.0.1:{DEBUG_PORT}")
+                context = browser.contexts[0]
+                page.goto("https://calendar.google.com", wait_until="load")
+
                 # Continue loop to check if new slot is free
                     
             else:
@@ -305,9 +317,6 @@ def add_event_to_calendar(initial_event, recognized_text=None):
 
                 # click it
                 day_cell.click()
-
-
-
                 print("day selected")
 
                 # # Get the Start time combobox input and click it
@@ -343,49 +352,14 @@ def add_event_to_calendar(initial_event, recognized_text=None):
                         # 兜底：选择最后一个 option
                         all_options.nth(count-1).click()
 
-                #page.get_by_label("End date").click()
-                # Suppose event["date"] = "2025-12-31"
-                # date_obj 是开始日期
+                
                 date_obj2 = datetime.strptime(event["end_date"], "%Y-%m-%d")
-                # if event["start_time"] > event["end_time"]:
-                #     end_date_obj = date_obj2 + timedelta(days=1)  # 增加一天
-                # else:
-                #     end_date_obj = date_obj2
 
                 date_str2 = date_obj2.strftime("%Y%m%d")  
 
                 print("end date is ", date_str2)
 
-                # day_cell2 = page.locator(
-                #     f'td[data-date="{date_str2}"] [role="gridcell"]'
-                # )
-                # day_cell2.wait_for(state="visible")
-                # day_cell2.scroll_into_view_if_needed()
-                # day_cell2.click()
-
-                
                 page.get_by_label("End date").click()
-                
-                # select the td representing the date
-                # day_cell2 = page.locator(f'td[data-date="{date_str2}"]:not([data-dragsource-type])')
-
-                # # wait until visible, scroll if needed
-                # day_cell2.wait_for(state="visible")
-                # day_cell2.scroll_into_view_if_needed()
-
-                # # click it
-                # day_cell2.click()
-
-                #page.get_by_role("gridcell", name="31").click()
-                # select the td representing the date
-                #day_cell2 = page.locator(f'td[data-date="{date_str2}"]:not([data-dragsource-type])')
-
-                # wait until visible, scroll if needed
-                #day_cell2.wait_for(state="visible")
-                #day_cell2.scroll_into_view_if_needed()
-
-                # click it
-                #day_cell2.click()
 
                 page.get_by_role("gridcell", name=f"{date_obj2.day}, {date_obj2.strftime('%A')}").click()
 
